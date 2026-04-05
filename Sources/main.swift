@@ -1,5 +1,6 @@
 import Cocoa
 import Carbon
+import ServiceManagement
 
 // MARK: - Global State
 
@@ -156,13 +157,58 @@ func eventTapCallback(
     return Unmanaged.passUnretained(event)
 }
 
+// MARK: - Launch at Login Helper
+
+let kLaunchAtLoginKey = "LaunchAtLogin"
+
+func isLaunchAtLoginEnabled() -> Bool {
+    return UserDefaults.standard.object(forKey: kLaunchAtLoginKey) as? Bool ?? true // 預設開啟
+}
+
+func setLaunchAtLogin(_ enabled: Bool) {
+    UserDefaults.standard.set(enabled, forKey: kLaunchAtLoginKey)
+    if #available(macOS 13.0, *) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            NSLog("[HalfWidthDigit] Failed to update login item: %@", error.localizedDescription)
+        }
+    } else {
+        // macOS 12 and earlier: use shared file list (deprecated but functional)
+        let bundleURL = Bundle.main.bundleURL as CFURL
+        if let loginItems = LSSharedFileListCreate(nil, kLSSharedFileListSessionLoginItems.takeRetainedValue(), nil)?.takeRetainedValue() {
+            if enabled {
+                LSSharedFileListInsertItemURL(loginItems, kLSSharedFileListItemLast.takeRetainedValue(), nil, nil, bundleURL, nil, nil)
+            } else {
+                if let items = LSSharedFileListCopySnapshot(loginItems, nil)?.takeRetainedValue() as? [LSSharedFileListItem] {
+                    for item in items {
+                        if let itemURL = LSSharedFileListItemCopyResolvedURL(item, 0, nil)?.takeRetainedValue() as URL?,
+                           itemURL == Bundle.main.bundleURL {
+                            LSSharedFileListItemRemove(loginItems, item)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - App Delegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var toggleMenuItem: NSMenuItem!
+    var launchAtLoginMenuItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 首次啟動時自動註冊開機啟動
+        if UserDefaults.standard.object(forKey: kLaunchAtLoginKey) == nil {
+            setLaunchAtLogin(true)
+        }
         setupMenuBar()
         setupEventTap()
         NSLog("[HalfWidthDigit] Started. ASCII source: %@",
@@ -183,6 +229,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
         toggleMenuItem.target = self
         menu.addItem(toggleMenuItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        launchAtLoginMenuItem = NSMenuItem(
+            title: isLaunchAtLoginEnabled() ? "✓ 開機時啟動" : "　開機時啟動",
+            action: #selector(toggleLaunchAtLogin(_:)),
+            keyEquivalent: ""
+        )
+        launchAtLoginMenuItem.target = self
+        menu.addItem(launchAtLoginMenuItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -255,6 +311,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         gEnabled.toggle()
         toggleMenuItem.title = gEnabled ? "✓ 已啟用" : "　已停用"
         statusItem.button?.appearsDisabled = !gEnabled
+    }
+
+    @objc func toggleLaunchAtLogin(_ sender: NSMenuItem) {
+        let newValue = !isLaunchAtLoginEnabled()
+        setLaunchAtLogin(newValue)
+        launchAtLoginMenuItem.title = newValue ? "✓ 開機時啟動" : "　開機時啟動"
     }
 
     @objc func showAbout() {
